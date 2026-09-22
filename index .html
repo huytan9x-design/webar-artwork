@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>WebAR Artwork Viewer — Prototype</title>
+
+  <!--
+    ============================================================
+    LIBRARY LOADING ORDER MATTERS:
+    1. A-Frame must load first (it creates the <a-scene> framework)
+    2. MindAR's A-Frame integration loads second (it registers
+       MindAR as a component/system that A-Frame can use)
+    We pin exact versions so a future MindAR update can't silently
+    break your deployed AR experience.
+    ============================================================
+  -->
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    /* A-Frame's scene fills the screen and hosts the live camera feed */
+    a-scene {
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* --- UI Overlay: instructions shown before/while scanning --- */
+    #scan-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 16px;
+      pointer-events: none; /* let touches pass through to the camera view */
+      color: white;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+    }
+
+    #scan-overlay h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 4px 0;
+    }
+
+    #scan-overlay p {
+      font-size: 13px;
+      opacity: 0.85;
+      margin: 0;
+      text-align: center;
+    }
+
+    /* Small reticle-style frame to hint at where to point the camera */
+    .scan-frame {
+      width: 70vw;
+      max-width: 320px;
+      aspect-ratio: 1;
+      margin-top: 40px;
+      border: 2px solid rgba(255,255,255,0.6);
+      border-radius: 16px;
+      box-shadow: 0 0 0 2000px rgba(0,0,0,0.35);
+    }
+
+    #scan-overlay.found .scan-frame { display: none; }
+    #scan-overlay.found h1,
+    #scan-overlay.found p { display: none; }
+
+    /* --- Loading state --- */
+    #loading {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: #000;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      font-size: 14px;
+    }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid rgba(255,255,255,0.2);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* --- Camera permission / error state --- */
+    #error-box {
+      position: fixed;
+      inset: 0;
+      z-index: 1001;
+      background: rgba(0,0,0,0.92);
+      color: white;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+      gap: 12px;
+    }
+    #error-box.visible { display: flex; }
+    #error-box button {
+      margin-top: 12px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      background: #fff;
+      color: #000;
+      font-weight: 600;
+    }
+
+    /* Mute/unmute control for the AR video overlay */
+    #mute-btn {
+      position: fixed;
+      bottom: 24px;
+      right: 20px;
+      z-index: 999;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.3);
+      color: white;
+      font-size: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ============ LOADING SCREEN (shown until MindAR + camera are ready) ============ -->
+  <div id="loading">
+    <div class="spinner"></div>
+    <div>Starting camera…</div>
+  </div>
+
+  <!-- ============ ERROR SCREEN (camera denied / unsupported browser) ============ -->
+  <div id="error-box">
+    <div style="font-size:32px;">⚠️</div>
+    <div id="error-message">Camera access is required for this experience.</div>
+    <button onclick="location.reload()">Try Again</button>
+  </div>
+
+  <!-- ============ SCAN INSTRUCTIONS OVERLAY ============ -->
+  <div id="scan-overlay">
+    <h1>Point your camera at the artwork</h1>
+    <p>Hold steady and keep the whole piece in frame</p>
+    <div class="scan-frame"></div>
+  </div>
+
+  <!-- Mute toggle for the overlay video -->
+  <button id="mute-btn" onclick="toggleMute()">🔇</button>
+
+  <!--
+    ============================================================
+    THE AR SCENE
+    ============================================================
+    mindar-image="imageTargetSrc: ...": path to your compiled .mind file.
+      -> REPLACE with your real compiled target once you have one.
+         For now this points to a MindAR sample target so you can
+         test tracking immediately using their sample printed card.
+    autoStart: true            -> camera starts immediately on load
+    uiScanning / uiLoading: no -> we use our own custom UI overlays above
+    maxTrack: 1                -> only track one target at a time (keeps this demo simple)
+  -->
+  <a-scene
+    mindar-image="imageTargetSrc: https://cdn.jsdelivr.net/gh/hiukim/mind-ar-js@1.1.4/examples/image-tracking/assets/card-example/card.mind; autoStart: true; uiScanning: no; uiLoading: no; maxTrack: 1;"
+    color-space="sRGB"
+    renderer="colorManagement: true, physicallyCorrectLights: true"
+    vr-mode-ui="enabled: false"
+    device-orientation-permission-ui="enabled: false"
+  >
+
+    <a-assets>
+      <!--
+        The overlay video.
+        REPLACE this src with your artwork's animation file.
+        crossorigin="anonymous" is required for videos loaded from
+        another domain (e.g. your storage bucket / CDN).
+      -->
+      <!--
+        Self-hosted relative path — this file lives in the SAME folder/repo
+        as index.html. This avoids any third-party CDN's hotlink protection,
+        CORS restrictions, or broken/expired links entirely. This is also
+        the pattern you'll use for your real artwork video later: just
+        upload your video file into the repo and point src at its filename.
+      -->
+      <video
+        id="overlay-video"
+        src="./sample-video.mp4"
+        preload="auto"
+        loop
+        playsinline
+        webkit-playsinline
+        crossorigin="anonymous"
+      ></video>
+    </a-assets>
+
+    <!-- Camera entity required by MindAR -->
+    <a-camera
+      position="0 0 0"
+      look-controls="enabled: false"
+      cursor="fuse: false"
+      raycaster="far: 10000; objects: .clickable"
+    ></a-camera>
+
+    <!--
+      mindar-image-target targetIndex="0" -> matches the FIRST target
+      inside your .mind file. If you compile multiple artworks into
+      one .mind file, each gets its own targetIndex (0, 1, 2, ...).
+
+      Everything nested inside this entity automatically inherits the
+      tracked artwork's position/rotation/scale every frame.
+    -->
+    <a-entity mindar-image-target="targetIndex: 0">
+
+      <!--
+        The video plane overlaid on the artwork.
+        position: "0 0 0" centers it exactly on the target image.
+        width/height: 1 x 0.552 matches the ASPECT RATIO of the sample
+        target image (it's not square). When you swap in your own
+        artwork image, update this ratio to match: height = width * (imageHeight / imageWidth)
+        rotation.x = -90 is NOT used here because MindAR's target plane
+        is already oriented correctly for a flat image target.
+      -->
+      <a-video
+        src="#overlay-video"
+        width="1"
+        height="0.552"
+        position="0 0 0"
+        class="clickable"
+      ></a-video>
+
+    </a-entity>
+
+  </a-scene>
+
+  <script>
+    const sceneEl = document.querySelector('a-scene');
+    const loadingEl = document.getElementById('loading');
+    const errorEl = document.getElementById('error-box');
+    const errorMsgEl = document.getElementById('error-message');
+    const scanOverlayEl = document.getElementById('scan-overlay');
+    const videoEl = document.getElementById('overlay-video');
+    const muteBtn = document.getElementById('mute-btn');
+
+    // --- Hide the loading spinner once MindAR + camera are ready ---
+    sceneEl.addEventListener('renderstart', () => {
+      loadingEl.style.display = 'none';
+    });
+
+    // --- MindAR fires this when the artwork enters/leaves the camera view ---
+    const targetEntity = document.querySelector('[mindar-image-target]');
+
+    targetEntity.addEventListener('targetFound', () => {
+      console.log('Artwork detected — starting overlay video');
+      scanOverlayEl.classList.add('found');
+
+      // Start playback right when the artwork is recognized.
+      // Muted autoplay is the only playback guaranteed to work
+      // without a user gesture on iOS Safari; we start muted and
+      // let the visitor tap the speaker icon to unmute.
+      videoEl.muted = true;
+      videoEl.currentTime = 0;
+      videoEl.play().catch(err => console.warn('Video play blocked:', err));
+    });
+
+    targetEntity.addEventListener('targetLost', () => {
+      console.log('Artwork lost — pausing overlay video');
+      scanOverlayEl.classList.remove('found');
+      videoEl.pause();
+    });
+
+    // --- Mute/unmute control ---
+    function toggleMute() {
+      videoEl.muted = !videoEl.muted;
+      muteBtn.textContent = videoEl.muted ? '🔇' : '🔊';
+    }
+
+    // --- Basic camera-permission error handling ---
+    // MindAR internally requests getUserMedia; if it's denied or
+    // unavailable (e.g. non-HTTPS context), the video/camera feed
+    // never starts. We detect that case and show a helpful message.
+    navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' } })
+      .then(stream => {
+        // We only needed this to check permission; stop the test stream
+        // immediately so MindAR can open its own camera session cleanly.
+        stream.getTracks().forEach(track => track.stop());
+      })
+      .catch(err => {
+        console.error('Camera permission error:', err);
+        loadingEl.style.display = 'none';
+        errorEl.classList.add('visible');
+        if (err.name === 'NotAllowedError') {
+          errorMsgEl.textContent = 'Camera permission was denied. Please allow camera access in your browser settings and reload.';
+        } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+          errorMsgEl.textContent = 'This experience requires a secure (HTTPS) connection to access your camera.';
+        } else {
+          errorMsgEl.textContent = 'Unable to access camera: ' + err.message;
+        }
+      });
+  </script>
+
+</body>
+</html>
